@@ -4,7 +4,7 @@ name: Dollar Channel Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "* * * * *"
 
 permissions:
   contents: read
@@ -34,8 +34,8 @@ jobs:
                       "User-Agent": "DollarBot/1.0"
                   }
               )
-              with urllib.request.urlopen(req, timeout=25) as r:
-                  return json.loads(r.read().decode("utf-8"))
+              with urllib.request.urlopen(req, timeout=25) as response:
+                  return json.loads(response.read().decode("utf-8"))
 
           token = os.environ["BOT_TOKEN"]
           channel = os.environ["CHANNEL_ID"]
@@ -49,7 +49,6 @@ jobs:
           if not isinstance(price, (int, float)) or price <= 0:
               raise ValueError("Invalid dollar price")
 
-          # Current date and time in Iran
           now_iran = datetime.now(ZoneInfo("Asia/Tehran"))
           date = now_iran.strftime("%Y/%m/%d")
           clock = now_iran.strftime("%H:%M")
@@ -57,24 +56,22 @@ jobs:
           message = (
               "💵 قیمت دلار آزاد ایران\n\n"
               f"💰 هر دلار: {price:,.0f} تومان\n"
-              f"🕒 تاریخ: {date}\n"
+              f"📅 تاریخ: {date}\n"
               f"⏰ ساعت ایران: {clock}\n\n"
               "⚠️ قیمت بازار ممکن است تغییر کند.\n\n"
               "@dollariran5"
           )
 
-          payload = json.dumps({
-              "chat_id": channel,
-              "text": message
-          }).encode("utf-8")
-
           result = get_json(
               f"https://api.telegram.org/bot{token}/sendMessage",
-              payload
+              json.dumps({
+                  "chat_id": channel,
+                  "text": message
+              }).encode("utf-8")
           )
 
           if not result.get("ok"):
               raise RuntimeError(str(result))
 
-          print("Message sent successfully at Iran time:", clock)
+          print("Message sent successfully:", clock)
           PY
