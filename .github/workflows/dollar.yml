@@ -22,6 +22,8 @@ jobs:
           import json
           import os
           import urllib.request
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
 
           def get_json(url, payload=None):
               req = urllib.request.Request(
@@ -47,13 +49,16 @@ jobs:
           if not isinstance(price, (int, float)) or price <= 0:
               raise ValueError("Invalid dollar price")
 
-          date = data.get("date", "")
-          clock = data.get("time", "")
+          # Current date and time in Iran
+          now_iran = datetime.now(ZoneInfo("Asia/Tehran"))
+          date = now_iran.strftime("%Y/%m/%d")
+          clock = now_iran.strftime("%H:%M")
 
           message = (
               "💵 قیمت دلار آزاد ایران\n\n"
               f"💰 هر دلار: {price:,.0f} تومان\n"
-              f"🕒 زمان داده: {date} {clock}\n\n"
+              f"🕒 تاریخ: {date}\n"
+              f"⏰ ساعت ایران: {clock}\n\n"
               "⚠️ قیمت بازار ممکن است تغییر کند.\n\n"
               "@dollariran5"
           )
@@ -71,5 +76,5 @@ jobs:
           if not result.get("ok"):
               raise RuntimeError(str(result))
 
-          print("Message sent successfully")
+          print("Message sent successfully at Iran time:", clock)
           PY
