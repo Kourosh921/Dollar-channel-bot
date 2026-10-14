@@ -1,0 +1,66 @@
+
+name: Dollar Channel Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send dollar price
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          def get_json(url, payload=None):
+              req = urllib.request.Request(
+                  url, data=payload,
+                  headers={"Content-Type": "application/json",
+                           "User-Agent": "DollarBot/1.0"}
+              )
+              with urllib.request.urlopen(req, timeout=25) as r:
+                  return json.loads(r.read().decode())
+
+          token = os.environ["BOT_TOKEN"]
+          channel = os.environ["CHANNEL_ID"]
+
+          data = get_json(
+              "https://nerkh.jahankhahan.shop/data/live.json"
+          )
+          price = data["rates"]["dollar"]
+
+          if not isinstance(price, (int, float)) or price <= 0:
+              raise ValueError("Invalid price")
+
+          message = (
+              "💵 قیمت دلار آزاد ایران\n\n"
+              f"💰 هر دلار: {price:,.0f} تومان\n"
+              f"🕒 زمان داده: {data.get('date', '')} "
+              f"{data.get('time', '')}\n\n"
+              "⚠️ قیمت بازار ممکن است تغییر کند."
+          )
+
+          result = get_json(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              json.dumps({
+                  "chat_id": channel,
+                  "text": message
+              }).encode()
+          )
+
+          if not result.get("ok"):
+              raise RuntimeError(str(result))
+
+          print("Message sent")
+          PY
