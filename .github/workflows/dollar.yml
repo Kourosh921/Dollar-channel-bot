@@ -1,10 +1,9 @@
-
 name: Dollar Channel Bot
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "* * * * *"
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: read
@@ -12,6 +11,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+
     steps:
       - name: Send dollar price
         env:
@@ -30,34 +30,63 @@ jobs:
                   url,
                   data=payload,
                   headers={
-                      "Content-Type": "application/json",
-                      "User-Agent": "DollarBot/1.0"
+                      "User-Agent": "DollarChannelBot/1.0",
+                      "Content-Type": "application/json"
                   }
               )
-              with urllib.request.urlopen(req, timeout=25) as response:
-                  return json.loads(response.read().decode("utf-8"))
+              with urllib.request.urlopen(
+                  req, timeout=30
+              ) as response:
+                  return json.loads(
+                      response.read().decode("utf-8")
+                  )
 
           token = os.environ["BOT_TOKEN"]
           channel = os.environ["CHANNEL_ID"]
 
-          data = get_json(
-              "https://nerkh.jahankhahan.shop/data/live.json"
+          # Get market data
+          api_url = (
+              "https://raw.githubusercontent.com/"
+              "iran-market/iran-market.github.io/"
+              "main/data/popular.json"
+          )
+          payload = get_json(api_url)
+
+          items = payload.get("data", [])
+          dollar = next(
+              (
+                  item for item in items
+                  if item.get("symbol") == "USD_IRR_FREE"
+              ),
+              None
           )
 
-          price = data["rates"]["dollar"]
+          if not dollar:
+              raise ValueError(
+                  "Free-market USD not found in API response"
+              )
 
-          if not isinstance(price, (int, float)) or price <= 0:
+          price = dollar.get("price")
+
+          if (
+              not isinstance(price, (int, float))
+              or isinstance(price, bool)
+              or price <= 0
+          ):
               raise ValueError("Invalid dollar price")
 
-          now_iran = datetime.now(ZoneInfo("Asia/Tehran"))
-          date = now_iran.strftime("%Y/%m/%d")
-          clock = now_iran.strftime("%H:%M")
+          # Iran time: message publication time,
+          # not necessarily the data update time.
+          now = datetime.now(ZoneInfo("Asia/Tehran"))
+          date = now.strftime("%Y/%m/%d")
+          clock = now.strftime("%H:%M")
 
           message = (
               "💵 قیمت دلار آزاد ایران\n\n"
               f"💰 هر دلار: {price:,.0f} تومان\n"
-              f"📅 تاریخ: {date}\n"
-              f"⏰ ساعت ایران: {clock}\n\n"
+              f"📅 تاریخ ارسال: {date}\n"
+              f"⏰ ساعت ارسال: {clock} به وقت ایران\n\n"
+              "ℹ️ زمان ارسال پیام لزوماً زمان به‌روزرسانی قیمت نیست.\n"
               "⚠️ قیمت بازار ممکن است تغییر کند.\n\n"
               "@dollariran5"
           )
@@ -71,7 +100,9 @@ jobs:
           )
 
           if not result.get("ok"):
-              raise RuntimeError(str(result))
+              raise RuntimeError(
+                  "Telegram could not send the message"
+              )
 
           print("Message sent successfully:", clock)
           PY
