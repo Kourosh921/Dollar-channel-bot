@@ -11,48 +11,158 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 3
 
     steps:
-      - name: Send dollar price
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Pillow
+        run: python -m pip install Pillow
+
+      - name: Send Dollar Sticker and Price
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
         run: |
           python - <<'PY'
-          import json
           import os
+          import json
+          import uuid
           import urllib.request
+          from io import BytesIO
           from datetime import datetime
           from zoneinfo import ZoneInfo
+          from PIL import Image, ImageDraw, ImageFont
 
-          def get_json(url, payload=None):
-              req = urllib.request.Request(
-                  url,
-                  data=payload,
+          TOKEN = os.environ["BOT_TOKEN"]
+          CHANNEL = os.environ["CHANNEL_ID"]
+
+          def telegram_request(method, data):
+              request = urllib.request.Request(
+                  f"https://api.telegram.org/bot{TOKEN}/{method}",
+                  data=json.dumps(data).encode(),
+                  headers={"Content-Type": "application/json"}
+              )
+              with urllib.request.urlopen(request, timeout=25) as response:
+                  result = json.loads(response.read().decode())
+
+              if not result.get("ok"):
+                  raise RuntimeError(f"Telegram API error: {result}")
+
+              return result
+
+          def create_dollar_sticker():
+              image = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+              draw = ImageDraw.Draw(image)
+
+              draw.ellipse(
+                  (22, 22, 490, 490),
+                  fill=(8, 35, 25, 255),
+                  outline=(93, 230, 151, 255),
+                  width=18
+              )
+
+              draw.rounded_rectangle(
+                  (95, 145, 417, 365),
+                  radius=30,
+                  fill=(30, 145, 83, 255),
+                  outline=(190, 255, 215, 255),
+                  width=10
+              )
+
+              draw.ellipse(
+                  (190, 178, 322, 310),
+                  fill=(12, 75, 45, 255),
+                  outline=(190, 255, 215, 255),
+                  width=7
+              )
+
+              font_path = (
+                  "/usr/share/fonts/truetype/"
+                  "dejavu/DejaVuSans-Bold.ttf"
+              )
+
+              dollar_font = ImageFont.truetype(font_path, 112)
+              label_font = ImageFont.truetype(font_path, 30)
+
+              draw.text(
+                  (256, 243), "$",
+                  font=dollar_font,
+                  anchor="mm",
+                  fill=(225, 255, 232, 255)
+              )
+
+              draw.text(
+                  (256, 405), "USD",
+                  font=label_font,
+                  anchor="mm",
+                  fill=(225, 255, 232, 255)
+              )
+
+              output = BytesIO()
+              image.save(output, format="WEBP", lossless=True)
+              return output.getvalue()
+
+          def send_sticker(sticker_bytes):
+              boundary = "----DollarSticker" + uuid.uuid4().hex
+
+              parts = []
+
+              def add_field(name, value):
+                  part = (
+                      f"--{boundary}\r\n"
+                      f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                      f"{value}\r\n"
+                  )
+                  parts.append(part.encode())
+
+              add_field("chat_id", CHANNEL)
+
+              header = (
+                  f"--{boundary}\r\n"
+                  'Content-Disposition: form-data; '
+                  'name="sticker"; filename="dollar.webp"\r\n'
+                  "Content-Type: image/webp\r\n\r\n"
+              ).encode()
+
+              parts.append(header + sticker_bytes + b"\r\n")
+              parts.append(f"--{boundary}--\r\n".encode())
+
+              request = urllib.request.Request(
+                  f"https://api.telegram.org/bot{TOKEN}/sendSticker",
+                  data=b"".join(parts),
                   headers={
-                      "User-Agent": "DollarChannelBot/1.0",
-                      "Content-Type": "application/json"
+                      "Content-Type":
+                      f"multipart/form-data; boundary={boundary}"
                   }
               )
-              with urllib.request.urlopen(
-                  req, timeout=30
-              ) as response:
-                  return json.loads(
-                      response.read().decode("utf-8")
-                  )
 
-          token = os.environ["BOT_TOKEN"]
-          channel = os.environ["CHANNEL_ID"]
+              with urllib.request.urlopen(request, timeout=25) as response:
+                  result = json.loads(response.read().decode())
 
-          # Get market data
+              if not result.get("ok"):
+                  raise RuntimeError(f"Sticker error: {result}")
+
+          # دریافت قیمت دلار آزاد
           api_url = (
               "https://raw.githubusercontent.com/"
-              "iran-market/iran-market.github.io/"
-              "main/data/popular.json"
+              "iran-market/iran-market.github.io/main/"
+              "data/popular.json"
           )
-          payload = get_json(api_url)
 
-          items = payload.get("data", [])
+          request = urllib.request.Request(
+              api_url,
+              headers={"User-Agent": "NabzDollarBot/1.0"}
+          )
+
+          with urllib.request.urlopen(request, timeout=25) as response:
+              market_data = json.loads(response.read().decode())
+
+          items = market_data.get("data", [])
+
           dollar = next(
               (
                   item for item in items
@@ -61,9 +171,9 @@ jobs:
               None
           )
 
-          if not dollar:
-              raise ValueError(
-                  "Free-market USD not found in API response"
+          if dollar is None:
+              raise RuntimeError(
+                  "قیمت دلار آزاد در API پیدا نشد."
               )
 
           price = dollar.get("price")
@@ -73,36 +183,37 @@ jobs:
               or isinstance(price, bool)
               or price <= 0
           ):
-              raise ValueError("Invalid dollar price")
+              raise RuntimeError("قیمت دریافتی معتبر نیست.")
 
-          # Iran time: message publication time,
-          # not necessarily the data update time.
+          # ساعت ایران
           now = datetime.now(ZoneInfo("Asia/Tehran"))
+
           date = now.strftime("%Y/%m/%d")
           clock = now.strftime("%H:%M")
 
+          # ساخت و ارسال استیکر دلار
+          sticker = create_dollar_sticker()
+          send_sticker(sticker)
+
+          # پیام قیمت
           message = (
               "💵 قیمت دلار آزاد ایران\n\n"
               f"💰 هر دلار: {price:,.0f} تومان\n"
               f"📅 تاریخ ارسال: {date}\n"
-              f"⏰ ساعت ارسال: {clock} به وقت ایران\n\n"
-              "ℹ️ زمان ارسال پیام لزوماً زمان به‌روزرسانی قیمت نیست.\n"
+              f"🕒 ساعت ارسال: {clock} به وقت ایران\n\n"
+              "ℹ️ ساعت بالا زمان ارسال پیام است؛ "
+              "نه لزوماً زمان به‌روزرسانی قیمت.\n"
               "⚠️ قیمت بازار ممکن است تغییر کند.\n\n"
               "@dollariran5"
           )
 
-          result = get_json(
-              f"https://api.telegram.org/bot{token}/sendMessage",
-              json.dumps({
-                  "chat_id": channel,
+          telegram_request(
+              "sendMessage",
+              {
+                  "chat_id": CHANNEL,
                   "text": message
-              }).encode("utf-8")
+              }
           )
 
-          if not result.get("ok"):
-              raise RuntimeError(
-                  "Telegram could not send the message"
-              )
-
-          print("Message sent successfully:", clock)
+          print("Dollar sticker and price message sent.")
           PY
