@@ -1,197 +1,247 @@
-
-name: Nabz Dollar Auto Fallback
+name: Nabz Dollar Bot
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "*/5 * * * *"
 
+permissions:
+  contents: read
+
 jobs:
-  send-prices:
+  publish:
     runs-on: ubuntu-latest
 
-    steps:
-      - name: Install dependencies
-        run: pip install requests
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+      ARZHAAM_API_KEY: ${{ secrets.ARZHAAM_API_KEY }}
 
-      - name: Collect prices and publish
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-          ARZHAAM_API_KEY: ${{ secrets.ARZHAAM_API_KEY }}
+    steps:
+      - name: Publish market prices
         run: |
           python - <<'PY'
           import os
-          import requests
-          import statistics
-          from datetime import datetime
+          import json
+          import urllib.request
+          import urllib.parse
+          from datetime import datetime, timezone
           from zoneinfo import ZoneInfo
 
-          sources = []
+          TOKEN = os.environ["BOT_TOKEN"]
+          CHANNEL = os.environ["CHANNEL_ID"]
+          API_KEY = os.environ["ARZHAAM_API_KEY"]
 
-          def add(name, usd, gold):
-              usd, gold = int(float(usd)), int(float(gold))
-              if usd > 0 and gold > 0:
-                  sources.append({
-                      "name": name,
-                      "usd": usd,
-                      "gold": gold
-                  })
+          ASSETS = [
+              "usd",
+              "gold_18",
+              "coin_emami",
+              "coin_nim",
+              "coin_rob",
+              "eur",
+              "aed",
+              "usdt",
+              "btc"
+          ]
 
-          def request_json(url, headers=None):
-              r = requests.get(
+          LABELS = {
+              "usd": "💵 دلار آزاد",
+              "gold_18": "🪙 طلای ۱۸ عیار",
+              "coin_emami": "🟡 سکه امامی",
+              "coin_nim": "🟡 نیم سکه",
+              "coin_rob": "🟡 ربع سکه",
+              "eur": "💶 یورو",
+              "aed": "🇦🇪 درهم امارات",
+              "usdt": "₮ تتر",
+              "btc": "₿ بیت‌کوین"
+          }
+
+          def get_json(url, headers=None):
+              req = urllib.request.Request(
                   url,
                   headers=headers or {
-                      "User-Agent": "Mozilla/5.0"
-                  },
-                  timeout=20
-              )
-              r.raise_for_status()
-              return r.json()
-
-          # 1. TGJU (rial -> toman)
-          try:
-              data = request_json(
-                  "https://call1.tgju.org/ajax.json"
-              )["current"]
-
-              add(
-                  "TGJU",
-                  float(data["price_dollar_rl"]["p"]) / 10,
-                  float(data["geram18"]["p"]) / 10
-              )
-          except Exception as e:
-              print("TGJU unavailable:", e)
-
-          # 2. Iran Market (prices in toman)
-          try:
-              data = request_json(
-                  "https://raw.githubusercontent.com/"
-                  "iran-market/iran-market.github.io/main/"
-                  "data/popular.json"
-              )["data"]
-
-              usd = next(
-                  x for x in data
-                  if x["symbol"] == "USD_IRR_FREE"
-              )
-              gold = next(
-                  x for x in data
-                  if x["symbol"] == "GOLD_18K_IRR"
+                      "User-Agent": "NabzDollarBot/1.0"
+                  }
               )
 
-              if not usd.get("stale") and not gold.get("stale"):
-                  add("Iran Market", usd["price"], gold["price"])
-          except Exception as e:
-              print("Iran Market unavailable:", e)
-
-          # 3. NerkhAra (aggregated prices in toman)
-          try:
-              data = request_json("https://nerkhara.com/api/rates")
-              print("NerkhAra response:", data)
-              # Only enable after verifying its public API schema.
-          except Exception as e:
-              print("NerkhAra API unavailable:", e)
-
-          # 4. Arzhaam (prices in toman)
-          key = os.getenv("ARZHAAM_API_KEY")
-          if key:
-              try:
-                  data = request_json(
-                      "https://arzhaam.ir/api/rates/latest",
-                      {"X-App-Key": key}
+              with urllib.request.urlopen(
+                  req, timeout=30
+              ) as response:
+                  return json.loads(
+                      response.read().decode("utf-8")
                   )
 
-                  if data.get("meta", {}).get("source") != "stale":
-                      rates = {
-                          x["assetId"]: x["price"]
-                          for x in data["rates"]
-                      }
+          # دریافت قیمت‌ها
+          query = urllib.parse.urlencode({
+              "assets": ",".join(ASSETS)
+          })
 
-                      add(
-                          "Arzhaam",
-                          rates["usd"],
-                          rates["gold_18"]
-                      )
-              except Exception as e:
-                  print("Arzhaam unavailable:", e)
-
-          if not sources:
-              raise Exception("All price sources failed.")
-
-          def get_consensus(key):
-              values = [s[key] for s in sources]
-              center = statistics.median(values)
-
-              accepted = [
-                  s for s in sources
-                  if abs(s[key] - center) / center <= 0.03
-              ]
-
-              if len(accepted) >= 2:
-                  return (
-                      int(statistics.median(s[key] for s in accepted)),
-                      accepted,
-                      "تجمیع چندمنبعی"
-                  )
-
-              if len(sources) == 1:
-                  return (
-                      sources[0][key],
-                      sources,
-                      "تک‌منبعی"
-                  )
-
-              raise Exception(
-                  "Sources disagree; refusing to publish."
-              )
-
-          usd, usd_sources, usd_mode = get_consensus("usd")
-          gold, gold_sources, gold_mode = get_consensus("gold")
-
-          def fmt(n):
-              return f"{n:,}".translate(
-                  str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
-              )
-
-          now = datetime.now(
-              ZoneInfo("Asia/Tehran")
-          ).strftime("%Y/%m/%d - %H:%M")
-
-          message = f"""
-          📊 <b>نبض دلار | گزارش بازار</b>
-
-          💵 دلار آزاد:
-          <b>{fmt(usd)} تومان</b>
-
-          🥇 طلای ۱۸ عیار:
-          <b>{fmt(gold)} تومان</b>
-
-          📡 منابع دلار: {len(usd_sources)}
-          📡 منابع طلا: {len(gold_sources)}
-
-          🔎 وضعیت: {usd_mode} / {gold_mode}
-          🕒 ساعت ایران: {now}
-
-          ⚠️ قیمت‌ها ممکن است تغییر کنند.
-          @dollariran5
-          """
-
-          result = requests.post(
-              f"https://api.telegram.org/bot"
-              f"{os.environ['BOT_TOKEN']}/sendMessage",
-              json={
-                  "chat_id": os.environ["CHANNEL_ID"],
-                  "text": message,
-                  "parse_mode": "HTML"
-              },
-              timeout=30
+          url = (
+              "https://arzhaam.ir/api/rates/latest?"
+              + query
           )
 
-          result.raise_for_status()
-          if not result.json().get("ok"):
-              raise Exception(result.text)
+          payload = get_json(
+              url,
+              {
+                  "X-App-Key": API_KEY,
+                  "User-Agent": "NabzDollarBot/1.0"
+              }
+          )
 
-          print("Published successfully!")
-          print("Sources:", [s["name"] for s in sources])
+          meta = payload.get("meta", {})
+
+          # جلوگیری از انتشار داده کش‌شده قدیمی
+          if meta.get("source") != "live":
+              raise ValueError("API is not live")
+
+          cache_age = meta.get("cacheAgeMs")
+
+          if isinstance(cache_age, (int, float)):
+              if cache_age > 15 * 60 * 1000:
+                  raise ValueError("API cache is too old")
+
+          rates = {
+              item.get("assetId"): item
+              for item in payload.get("rates", [])
+          }
+
+          now_utc = datetime.now(timezone.utc)
+          tehran = ZoneInfo("Asia/Tehran")
+
+          lines = [
+              "📊 نبض بازار | قیمت ارز و طلا",
+              ""
+          ]
+
+          # بررسی تک‌تک قیمت‌ها
+          for asset in ASSETS:
+
+              item = rates.get(asset)
+
+              if not item:
+                  raise ValueError(
+                      f"Missing price: {asset}"
+                  )
+
+              price = item.get("price")
+
+              if (
+                  not isinstance(price, (int, float))
+                  or isinstance(price, bool)
+                  or price <= 0
+              ):
+                  raise ValueError(
+                      f"Invalid price: {asset}"
+                  )
+
+              updated = item.get("updatedAt")
+
+              if not updated:
+                  raise ValueError(
+                      f"Missing timestamp: {asset}"
+                  )
+
+              data_time = datetime.fromisoformat(
+                  updated.replace("Z", "+00:00")
+              )
+
+              age = (
+                  now_utc - data_time
+              ).total_seconds() / 60
+
+              if age < -5 or age > 45:
+                  raise ValueError(
+                      f"Old price: {asset}"
+                  )
+
+              change = item.get("changePercent24h")
+
+              if isinstance(change, (int, float)):
+                  change_text = f"{change:+.2f}%"
+              else:
+                  change_text = "نامشخص"
+
+              direction = item.get("direction")
+
+              if direction == "up":
+                  arrow = "🔺"
+              elif direction == "down":
+                  arrow = "🔻"
+              else:
+                  arrow = "➖"
+
+              local_time = data_time.astimezone(tehran)
+              time_text = local_time.strftime("%H:%M")
+
+              lines.append(
+                  f"{LABELS[asset]}: "
+                  f"{price:,.0f} تومان"
+              )
+
+              lines.append(
+                  f"   {arrow} تغییر ۲۴ ساعته: "
+                  f"{change_text}"
+              )
+
+              lines.append(
+                  f"   🕒 زمان داده: {time_text}"
+              )
+
+              lines.append("")
+
+          iran_now = datetime.now(tehran)
+
+          lines.extend([
+              "⚠️ قیمت‌ها ممکن است تغییر کنند.",
+              "این اطلاعات صرفاً جهت اطلاع‌رسانی است؛ "
+              "توصیه خرید یا فروش نیست.",
+              "",
+              "📅 زمان ارسال: "
+              + iran_now.strftime("%Y/%m/%d - %H:%M"),
+              "",
+              "@dollariran5"
+          ])
+
+          message = "\n".join(lines)
+
+          # ارسال به کانال تلگرام
+          telegram_url = (
+              f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+          )
+
+          result = get_json(
+              telegram_url,
+              headers={
+                  "Content-Type": "application/json",
+                  "User-Agent": "NabzDollarBot/1.0"
+              }
+          ) if False else None
+
+          body = json.dumps({
+              "chat_id": CHANNEL,
+              "text": message
+          }).encode("utf-8")
+
+          req = urllib.request.Request(
+              telegram_url,
+              data=body,
+              headers={
+                  "Content-Type": "application/json"
+              }
+          )
+
+          with urllib.request.urlopen(
+              req, timeout=30
+          ) as response:
+              result = json.loads(
+                  response.read().decode("utf-8")
+              )
+
+          if not result.get("ok"):
+              raise RuntimeError(
+                  "Telegram message failed"
+              )
+
+          print("Market prices published successfully!")
           PY
