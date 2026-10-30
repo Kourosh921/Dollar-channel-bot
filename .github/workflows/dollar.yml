@@ -33,39 +33,31 @@ jobs:
           API_KEY = os.environ["ARZHAAM_API_KEY"]
 
           ASSETS = [
-              "usd",
-              "gold_18",
-              "coin_emami",
-              "coin_nim",
-              "coin_rob",
-              "eur",
-              "aed",
-              "usdt",
-              "btc"
+              "usd", "gold_18",
+              "coin_emami", "coin_nim", "coin_rob",
+              "eur", "aed", "usdt", "btc"
           ]
 
           LABELS = {
-              "usd": "💵 دلار آزاد",
-              "gold_18": "🪙 طلای ۱۸ عیار",
-              "coin_emami": "🟡 سکه امامی",
-              "coin_nim": "🟡 نیم سکه",
-              "coin_rob": "🟡 ربع سکه",
-              "eur": "💶 یورو",
-              "aed": "🇦🇪 درهم امارات",
-              "usdt": "₮ تتر",
-              "btc": "₿ بیت‌کوین"
+              "usd": "دلار آزاد",
+              "gold_18": "طلای ۱۸ عیار",
+              "coin_emami": "سکه امامی",
+              "coin_nim": "نیم سکه",
+              "coin_rob": "ربع سکه",
+              "eur": "یورو",
+              "aed": "درهم",
+              "usdt": "تتر",
+              "btc": "بیت‌کوین"
           }
 
-          def get_json(url, headers=None):
-              req = urllib.request.Request(
+          def get_json(url, headers=None, data=None):
+              request = urllib.request.Request(
                   url,
-                  headers=headers or {
-                      "User-Agent": "NabzDollarBot/1.0"
-                  }
+                  headers=headers or {},
+                  data=data
               )
-
               with urllib.request.urlopen(
-                  req, timeout=30
+                  request, timeout=30
               ) as response:
                   return json.loads(
                       response.read().decode("utf-8")
@@ -85,45 +77,55 @@ jobs:
               url,
               {
                   "X-App-Key": API_KEY,
-                  "User-Agent": "NabzDollarBot/1.0"
+                  "User-Agent": "NabzDollarBot/2.1"
               }
           )
 
           meta = payload.get("meta", {})
-
-          # جلوگیری از انتشار داده کش‌شده قدیمی
-          if meta.get("source") != "live":
-              raise ValueError("API is not live")
-
+          source = meta.get("source")
           cache_age = meta.get("cacheAgeMs")
 
-          if isinstance(cache_age, (int, float)):
-              if cache_age > 15 * 60 * 1000:
-                  raise ValueError("API cache is too old")
+          print("API SOURCE:", source)
+          print("CACHE AGE:", cache_age)
 
-          rates = {
+          if source not in ("live", "stale"):
+              raise ValueError("Unknown API source status")
+
+          if not isinstance(cache_age, (int, float)):
+              raise ValueError("Cache age is missing")
+
+          # کش سرویس نباید بیشتر از ۱۵ دقیقه باشد
+          if cache_age > 15 * 60 * 1000:
+              raise ValueError("API cache is too old")
+
+          if meta.get("currency") != "toman":
+              raise ValueError("Unexpected price currency")
+
+          rates = payload.get("rates", [])
+
+          rate_map = {
               item.get("assetId"): item
-              for item in payload.get("rates", [])
+              for item in rates
+              if isinstance(item, dict)
           }
+
+          missing = [
+              asset for asset in ASSETS
+              if asset not in rate_map
+          ]
+
+          if missing:
+              raise ValueError(
+                  "Missing assets: " + ", ".join(missing)
+              )
 
           now_utc = datetime.now(timezone.utc)
           tehran = ZoneInfo("Asia/Tehran")
+          data_times = {}
 
-          lines = [
-              "📊 نبض بازار | قیمت ارز و طلا",
-              ""
-          ]
-
-          # بررسی تک‌تک قیمت‌ها
+          # کنترل صحت و تازگی تک‌تک قیمت‌ها
           for asset in ASSETS:
-
-              item = rates.get(asset)
-
-              if not item:
-                  raise ValueError(
-                      f"Missing price: {asset}"
-                  )
-
+              item = rate_map[asset]
               price = item.get("price")
 
               if (
@@ -132,116 +134,111 @@ jobs:
                   or price <= 0
               ):
                   raise ValueError(
-                      f"Invalid price: {asset}"
+                      "Invalid price: " + asset
                   )
 
               updated = item.get("updatedAt")
 
               if not updated:
                   raise ValueError(
-                      f"Missing timestamp: {asset}"
+                      "Missing update time: " + asset
                   )
 
               data_time = datetime.fromisoformat(
                   updated.replace("Z", "+00:00")
               )
 
+              if data_time.tzinfo is None:
+                  raise ValueError(
+                      "Invalid timezone: " + asset
+                  )
+
               age = (
                   now_utc - data_time
               ).total_seconds() / 60
 
-              if age < -5 or age > 45:
+              if age < -5 or age > 90:
                   raise ValueError(
-                      f"Old price: {asset}"
+                      f"Old price for {asset}: {age:.0f} minutes"
                   )
 
+              data_times[asset] = data_time
+
+          # نمایش قیمت و درصد تغییر
+          def show(asset):
+              item = rate_map[asset]
+              price = item["price"]
               change = item.get("changePercent24h")
 
-              if isinstance(change, (int, float)):
-                  change_text = f"{change:+.2f}%"
-              else:
-                  change_text = "نامشخص"
+              result = f"{price:,.0f}"
 
-              direction = item.get("direction")
+              if (
+                  isinstance(change, (int, float))
+                  and not isinstance(change, bool)
+              ):
+                  result += f" ({change:+.1f}٪)"
 
-              if direction == "up":
-                  arrow = "🔺"
-              elif direction == "down":
-                  arrow = "🔻"
-              else:
-                  arrow = "➖"
+              return result
 
-              local_time = data_time.astimezone(tehran)
-              time_text = local_time.strftime("%H:%M")
-
-              lines.append(
-                  f"{LABELS[asset]}: "
-                  f"{price:,.0f} تومان"
-              )
-
-              lines.append(
-                  f"   {arrow} تغییر ۲۴ ساعته: "
-                  f"{change_text}"
-              )
-
-              lines.append(
-                  f"   🕒 زمان داده: {time_text}"
-              )
-
-              lines.append("")
+          lines = [
+              "📊 نبض دلار | قیمت ارز و طلا",
+              "",
+              f"💵 دلار: {show('usd')} | 🥇 طلای ۱۸: {show('gold_18')}",
+              f"🪙 امامی: {show('coin_emami')} | نیم: {show('coin_nim')} | ربع: {show('coin_rob')}",
+              f"💶 یورو: {show('eur')} | درهم: {show('aed')}",
+              f"₮ تتر: {show('usdt')} | ₿ بیت‌کوین: {show('btc')}",
+              ""
+          ]
 
           iran_now = datetime.now(tehran)
+          oldest = min(data_times.values()).astimezone(tehran)
+
+          lines.append(
+              "🕒 قدیمی‌ترین داده: "
+              + oldest.strftime("%H:%M")
+          )
+
+          lines.append(
+              "📅 ارسال: "
+              + iran_now.strftime("%Y/%m/%d - %H:%M")
+          )
+
+          if source == "stale":
+              lines.append(
+                  "⚠️ پاسخ سرویس از کش موقت است؛ "
+                  "زمان هر قیمت بررسی شده."
+              )
 
           lines.extend([
-              "⚠️ قیمت‌ها ممکن است تغییر کنند.",
-              "این اطلاعات صرفاً جهت اطلاع‌رسانی است؛ "
-              "توصیه خرید یا فروش نیست.",
               "",
-              "📅 زمان ارسال: "
-              + iran_now.strftime("%Y/%m/%d - %H:%M"),
+              "⚠️ قیمت‌ها ممکن است تغییر کنند؛ "
+              "صرفاً جهت اطلاع‌رسانی.",
               "",
               "@dollariran5"
           ])
 
           message = "\n".join(lines)
 
-          # ارسال به کانال تلگرام
+          # ارسال به تلگرام
           telegram_url = (
               f"https://api.telegram.org/bot{TOKEN}/sendMessage"
           )
-
-          result = get_json(
-              telegram_url,
-              headers={
-                  "Content-Type": "application/json",
-                  "User-Agent": "NabzDollarBot/1.0"
-              }
-          ) if False else None
 
           body = json.dumps({
               "chat_id": CHANNEL,
               "text": message
           }).encode("utf-8")
 
-          req = urllib.request.Request(
+          result = get_json(
               telegram_url,
-              data=body,
-              headers={
+              {
                   "Content-Type": "application/json"
-              }
+              },
+              body
           )
 
-          with urllib.request.urlopen(
-              req, timeout=30
-          ) as response:
-              result = json.loads(
-                  response.read().decode("utf-8")
-              )
-
           if not result.get("ok"):
-              raise RuntimeError(
-                  "Telegram message failed"
-              )
+              raise RuntimeError("Telegram send failed")
 
-          print("Market prices published successfully!")
+          print("Message sent successfully!")
           PY
