@@ -30,13 +30,11 @@ jobs:
           from zoneinfo import ZoneInfo
 
           API_URL = "https://arzhaam.ir/api/rates/latest"
-
           ASSETS = [
               "usd", "eur", "gold_18",
               "coin_emami", "coin_nim", "coin_rob",
               "aed", "usdt", "btc"
           ]
-
           TEHRAN = ZoneInfo("Asia/Tehran")
 
           def fa_digits(value):
@@ -45,88 +43,77 @@ jobs:
               )
 
           def format_price(value):
-              number = int(round(float(value)))
-              return fa_digits(f"{number:,}".replace(",", "٬"))
+              return fa_digits(
+                  f"{int(round(float(value))):,}".replace(",", "٬")
+              )
 
           def format_change(value):
               try:
                   number = float(value)
                   if not math.isfinite(number):
-                      return "نامشخص"
-                  return fa_digits(f"{number:+.2f}%")
+                      return "⚪ نامشخص"
+                  if number > 0:
+                      return f"🟢 +{fa_digits(f'{number:.2f}')}٪"
+                  if number < 0:
+                      return f"🔴 {fa_digits(f'{number:.2f}')}٪"
+                  return "⚪ ۰٫۰۰٪"
               except (TypeError, ValueError):
-                  return "نامشخص"
+                  return "⚪ نامشخص"
 
           def parse_updated_at(value):
               if not value:
                   return None
-
               try:
                   result = datetime.fromisoformat(
                       str(value).replace("Z", "+00:00")
                   )
-
                   if result.tzinfo is None:
                       result = result.replace(tzinfo=timezone.utc)
-
                   return result.astimezone(TEHRAN)
-
               except (TypeError, ValueError):
                   return None
 
           def gregorian_to_jalali(gy, gm, gd):
-              month_days = [
+              md = [
                   31, 28, 31, 30, 31, 30,
                   31, 31, 30, 31, 30, 31
               ]
-
               gy2 = gy - 1600
               gm2 = gm - 1
               gd2 = gd - 1
-
               day_no = (
-                  365 * gy2
-                  + (gy2 + 3) // 4
+                  365 * gy2 + (gy2 + 3) // 4
                   - (gy2 + 99) // 100
                   + (gy2 + 399) // 400
               )
-
-              for index in range(gm2):
-                  day_no += month_days[index]
-
+              for i in range(gm2):
+                  day_no += md[i]
               if gm2 > 1 and (
                   (gy % 4 == 0 and gy % 100 != 0)
                   or gy % 400 == 0
               ):
                   day_no += 1
-
               day_no += gd2
-
               j_day_no = day_no - 79
               j_np = j_day_no // 12053
               j_day_no %= 12053
-
               jy = 979 + 33 * j_np + 4 * (j_day_no // 1461)
               j_day_no %= 1461
-
               if j_day_no >= 366:
                   jy += (j_day_no - 1) // 365
                   j_day_no = (j_day_no - 1) % 365
-
               if j_day_no < 186:
                   jm = 1 + j_day_no // 31
                   jd = 1 + j_day_no % 31
               else:
                   jm = 7 + (j_day_no - 186) // 30
                   jd = 1 + (j_day_no - 186) % 30
-
               return jy, jm, jd
 
           def get_rates(api_key):
               query = urllib.parse.urlencode({
                   "assets": ",".join(ASSETS)
               })
-
               request = urllib.request.Request(
                   f"{API_URL}?{query}",
                   headers={
@@ -137,7 +124,6 @@ jobs:
               )
 
               last_error = None
-
               for attempt in range(1, 4):
                   try:
                       with urllib.request.urlopen(
@@ -154,21 +140,16 @@ jobs:
                           raise ValueError("Rates list not found")
 
                       rates = {}
-
                       for item in payload["rates"]:
                           if not isinstance(item, dict):
                               continue
-
                           asset_id = item.get("assetId")
-
                           try:
                               price = float(item.get("price"))
                           except (TypeError, ValueError):
                               continue
-
                           if (
-                              asset_id
-                              and math.isfinite(price)
+                              asset_id and math.isfinite(price)
                               and price > 0
                           ):
                               rates[asset_id] = item
@@ -177,24 +158,16 @@ jobs:
                           raise ValueError("USD price is missing")
 
                       meta = payload.get("meta") or {}
-
                       print("API SOURCE:", meta.get("source", "unknown"))
-                      print(
-                          "CACHE AGE:",
-                          meta.get("cacheAgeMs", "unknown")
-                      )
-
+                      print("CACHE AGE:", meta.get("cacheAgeMs", "unknown"))
                       return rates
 
                   except Exception as error:
                       last_error = error
-
                       print(
                           f"API attempt {attempt}/3 failed:",
-                          type(error).__name__,
-                          str(error)
+                          type(error).__name__, str(error)
                       )
-
                       if attempt < 3:
                           time.sleep(attempt * 3)
 
@@ -222,7 +195,6 @@ jobs:
 
               for asset_id, label in assets:
                   item = rates.get(asset_id)
-
                   if not item:
                       print("Skipped missing asset:", asset_id)
                       continue
@@ -231,18 +203,15 @@ jobs:
                   change = format_change(
                       item.get("changePercent24h")
                   )
-
                   lines.append(
                       f"{label}: {price} تومان | {change}"
                   )
 
               update_times = []
-
               for item in rates.values():
                   updated = parse_updated_at(
                       item.get("updatedAt")
                   )
-
                   if updated:
                       update_times.append(updated)
 
@@ -253,15 +222,12 @@ jobs:
                   oldest_text = "نامشخص"
 
               now = datetime.now(TEHRAN)
-
               jy, jm, jd = gregorian_to_jalali(
                   now.year, now.month, now.day
               )
-
               jalali_date = fa_digits(
                   f"{jy:04d}/{jm:02d}/{jd:02d}"
               )
-
               send_time = fa_digits(now.strftime("%H:%M"))
 
               lines.extend([
@@ -273,14 +239,10 @@ jobs:
                   "",
                   "@dollariran5"
               ])
-
               return "\n".join(lines)
 
           def send_to_telegram(token, channel, message):
-              url = (
-                  f"https://api.telegram.org/bot{token}/sendMessage"
-              )
-
+              url = f"https://api.telegram.org/bot{token}/sendMessage"
               body = urllib.parse.urlencode({
                   "chat_id": channel,
                   "text": message
@@ -303,16 +265,12 @@ jobs:
                       response.read().decode("utf-8")
                   )
 
-              if (
-                  not isinstance(result, dict)
-                  or result.get("ok") is not True
-              ):
+              if not isinstance(result, dict) or result.get("ok") is not True:
                   description = (
                       result.get("description", "Unknown Telegram error")
                       if isinstance(result, dict)
                       else "Invalid Telegram response"
                   )
-
                   raise RuntimeError(
                       f"Telegram error: {description}"
                   )
@@ -328,8 +286,7 @@ jobs:
                   ("BOT_TOKEN", bot_token),
                   ("CHANNEL_ID", channel_id),
                   ("ARZHAAM_API_KEY", api_key)
-              ]
-              if not value
+              ] if not value
           ]
 
           if missing:
@@ -339,10 +296,5 @@ jobs:
 
           rates = get_rates(api_key)
           message = build_message(rates)
-
-          send_to_telegram(
-              bot_token,
-              channel_id,
-              message
-          )
+          send_to_telegram(bot_token, channel_id, message)
           PY
