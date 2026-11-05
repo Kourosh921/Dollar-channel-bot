@@ -1,10 +1,17 @@
- 
+
 name: Nabz Dollar Bot
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nabz-dollar
+  cancel-in-progress: false
 
 jobs:
   send-prices:
@@ -15,100 +22,148 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Start TGJU price reader
+      - name: Start TGJU service
         run: |
           docker pull ghcr.io/amiranmanesh/tgju-api-go:latest
           docker run -d --name tgju-api -p 8080:8080 \
             ghcr.io/amiranmanesh/tgju-api-go:latest
 
-      - name: Wait for price service
+      - name: Wait for TGJU
         run: |
-          for i in {1..20}; do
+          for i in {1..30}; do
             if curl -fsS http://localhost:8080/healthz; then
               exit 0
             fi
             sleep 2
           done
-          echo "TGJU service did not start"
+          echo "TGJU service unavailable"
           exit 1
 
-      - name: Install Python packages
+      - name: Install packages
         run: |
-          python -m pip install requests
+          pip install requests jdatetime
 
-      - name: Send prices to Telegram
+      - name: Send prices
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
         run: |
           python <<'PY'
           import os
+          import json
           import requests
+          import jdatetime
+
+          from pathlib import Path
           from datetime import datetime
           from zoneinfo import ZoneInfo
 
           TGJU = "http://localhost:8080"
+          STATE_FILE = Path("prices.json")
           TIMEOUT = 20
 
           def get_json(url):
-              r = requests.get(url, timeout=TIMEOUT)
-              r.raise_for_status()
-              return r.json()
+              response = requests.get(url, timeout=TIMEOUT)
+              response.raise_for_status()
+              return response.json()
 
-          def get_tgju_items(market, keys):
+          def get_items(market, keys):
               url = f"{TGJU}/v1/markets/{market}/items"
               data = get_json(url + "?keys=" + ",".join(keys))
-              items = data.get("items", [])
-              return {item.get("key"): item for item in items}
 
-          def toman(item):
+              items = data.get("items", [])
+
+              if isinstance(items, dict):
+                  return items
+
+              return {
+                  item["key"]: item
+                  for item in items
+                  if isinstance(item, dict) and item.get("key")
+              }
+
+          def get_price(item):
               value = item.get("price", {}).get("value")
+
               if value is None:
-                  raise ValueError("Price missing")
+                  raise ValueError("Price is missing")
+
               value = float(value) / 10
+
               if value <= 0:
                   raise ValueError("Invalid price")
+
               return value
 
-          def change_text(item):
+          def load_previous():
+              try:
+                  return json.loads(
+                      STATE_FILE.read_text(encoding="utf-8")
+                  )
+              except Exception:
+                  return {}
+
+          def calculate_change(name, price, previous, item):
               change = item.get("change", {})
-              percent = change.get("percent")
               status = change.get("status")
+              percent = change.get("percent")
 
-              if percent is None or status not in ("low", "high"):
-                  return "درصد تغییر: نامشخص"
+              # First preference: daily change from TGJU
+              if percent is not None and status in ("high", "low"):
+                  percent = abs(float(percent))
 
-              sign = "+" if status == "high" else "-"
-              arrow = "▲" if status == "high" else "▼"
-              return f"{arrow} {sign}{abs(float(percent)):.2f}٪"
+                  if status == "high":
+                      return f"▲ +{percent:.2f}٪"
 
-          def fmt(value):
-              return f"{value:,.0f}"
+                  return f"▼ -{percent:.2f}٪"
 
-          def get_btc():
+              # Second preference: compare with previous bot run
+              old_price = previous.get(name)
+
+              if old_price is not None and float(old_price) > 0:
+                  percent = (
+                      (price - float(old_price))
+                      / float(old_price)
+                  ) * 100
+
+                  if percent > 0:
+                      return f"▲ +{percent:.2f}٪"
+
+                  if percent < 0:
+                      return f"▼ {percent:.2f}٪"
+
+                  return "➖ ۰٫۰۰٪"
+
+              return "🆕 ثبت اولیه"
+
+          def fmt(number):
+              return f"{number:,.0f}"
+
+          def get_bitcoin():
               urls = [
                   "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT",
                   "https://data-api.binance.vision/api/v3/ticker/24hr?symbol=BTCUSDT"
               ]
 
-              last_error = None
               for url in urls:
                   try:
                       data = get_json(url)
                       price = float(data["lastPrice"])
                       change = float(data["priceChangePercent"])
+
                       if price > 0:
                           return price, change
-                  except Exception as e:
-                      last_error = e
+                  except Exception as error:
+                      print("Bitcoin source failed:", error)
 
-              raise RuntimeError(f"Bitcoin sources failed: {last_error}")
+              raise RuntimeError("Bitcoin sources unavailable")
 
           def send_telegram(message):
               token = os.environ["BOT_TOKEN"]
               channel = os.environ["CHANNEL_ID"]
 
               url = f"https://api.telegram.org/bot{token}/sendMessage"
+
               response = requests.post(
                   url,
                   data={
@@ -118,24 +173,29 @@ jobs:
                   },
                   timeout=TIMEOUT
               )
+
               response.raise_for_status()
 
               result = response.json()
+
               if not result.get("ok"):
                   raise RuntimeError(result)
 
           def main():
-              currency = get_tgju_items(
+              previous = load_previous()
+              current = {}
+
+              currency = get_items(
                   "currency",
                   ["price_dollar_rl", "price_eur", "price_aed"]
               )
 
-              gold = get_tgju_items(
+              gold = get_items(
                   "gold",
                   ["geram18"]
               )
 
-              coin = get_tgju_items(
+              coins = get_items(
                   "coin",
                   ["sekee", "nim", "rob"]
               )
@@ -145,14 +205,15 @@ jobs:
                   ("یورو", currency["price_eur"]),
                   ("درهم امارات", currency["price_aed"]),
                   ("طلای ۱۸ عیار", gold["geram18"]),
-                  ("سکه امامی", coin["sekee"]),
-                  ("نیم‌سکه", coin["nim"]),
-                  ("ربع‌سکه", coin["rob"]),
+                  ("سکه امامی", coins["sekee"]),
+                  ("نیم‌سکه", coins["nim"]),
+                  ("ربع‌سکه", coins["rob"])
               ]
 
               now = datetime.now(ZoneInfo("Asia/Tehran"))
-              date_text = now.strftime("%Y/%m/%d")
-              time_text = now.strftime("%H:%M:%S")
+              jalali = jdatetime.datetime.fromgregorian(
+                  datetime=now.replace(tzinfo=None)
+              )
 
               lines = [
                   "📊 نبض دلار | قیمت بازار",
@@ -160,29 +221,32 @@ jobs:
               ]
 
               for name, item in assets:
-                  price = toman(item)
-                  change = change_text(item)
+                  price = get_price(item)
+                  change = calculate_change(
+                      name, price, previous, item
+                  )
+
+                  current[name] = price
+
                   lines.append(
                       f"💰 {name}: {fmt(price)} تومان\n"
                       f"   {change}"
                   )
 
-              btc_price, btc_change = get_btc()
-              btc_sign = "+" if btc_change >= 0 else ""
+              btc_price, btc_change = get_bitcoin()
+
               btc_arrow = "▲" if btc_change >= 0 else "▼"
+              btc_sign = "+" if btc_change >= 0 else ""
 
               lines.extend([
                   "",
                   "🪙 بازار ارز دیجیتال",
                   f"₿ بیت‌کوین: {fmt(btc_price)} تتر",
-                  f"   {btc_arrow} {btc_sign}{btc_change:.2f}٪"
-              ])
-
-              lines.extend([
+                  f"   {btc_arrow} {btc_sign}{btc_change:.2f}٪",
                   "",
                   "━━━━━━━━━━━━━━━━━━",
-                  f"🗓 تاریخ: {date_text}",
-                  f"🕒 ساعت تهران: {time_text}",
+                  f"🗓 تاریخ: {jalali.strftime('%Y/%m/%d')}",
+                  f"🕒 ساعت تهران: {now.strftime('%H:%M:%S')}",
                   "",
                   "⚠️ قیمت‌ها ممکن است تغییر کنند.",
                   "صرفاً جهت اطلاع‌رسانی؛ نه توصیه خرید یا فروش.",
@@ -190,10 +254,27 @@ jobs:
                   "@dollariran5"
               ])
 
-              message = "\n".join(lines)
-              send_telegram(message)
+              send_telegram("\n".join(lines))
+
+              STATE_FILE.write_text(
+                  json.dumps(current, ensure_ascii=False, indent=2),
+                  encoding="utf-8"
+              )
+
               print("MESSAGE SENT SUCCESSFULLY")
 
           if __name__ == "__main__":
               main()
           PY
+
+      - name: Save previous prices
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add prices.json
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Update previous prices"
+            git push
+          fi
