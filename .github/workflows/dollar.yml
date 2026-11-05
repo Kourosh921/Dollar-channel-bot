@@ -1,3 +1,4 @@
+ 
 name: Nabz Dollar Bot
 
 on:
@@ -6,388 +7,193 @@ on:
     - cron: "*/5 * * * *"
 
 jobs:
-  update:
+  send-prices:
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
-      - name: Get prices and send to Telegram
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start TGJU price reader
+        run: |
+          docker pull ghcr.io/amiranmanesh/tgju-api-go:latest
+          docker run -d --name tgju-api -p 8080:8080 \
+            ghcr.io/amiranmanesh/tgju-api-go:latest
+
+      - name: Wait for price service
+        run: |
+          for i in {1..20}; do
+            if curl -fsS http://localhost:8080/healthz; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "TGJU service did not start"
+          exit 1
+
+      - name: Install Python packages
+        run: |
+          python -m pip install requests
+
+      - name: Send prices to Telegram
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-
         run: |
-          pip install requests beautifulsoup4
-
-          python - <<'PY'
+          python <<'PY'
           import os
-          import re
-          import time
           import requests
-          from bs4 import BeautifulSoup
-          from datetime import datetime, timezone
+          from datetime import datetime
           from zoneinfo import ZoneInfo
 
-          TEHRAN = ZoneInfo("Asia/Tehran")
-          BASE = "https://www.tgju.org/profile/"
+          TGJU = "http://localhost:8080"
+          TIMEOUT = 20
 
-          ASSETS = {
-              "usd": ("price_dollar_rl", "💵 دلار آزاد"),
-              "eur": ("price_eur", "💶 یورو"),
-              "gold": ("geram18", "🥇 طلای ۱۸ عیار"),
-              "coin": ("sekee", "🪙 سکه امامی"),
-              "half": ("nim", "نیم سکه"),
-              "quarter": ("rob", "ربع سکه"),
-              "aed": ("price_aed", "🇦🇪 درهم"),
-              "usdt": ("price_tether", "₮ تتر"),
-              "btc": ("crypto-bitcoin", "₿ بیت‌کوین"),
-          }
+          def get_json(url):
+              r = requests.get(url, timeout=TIMEOUT)
+              r.raise_for_status()
+              return r.json()
 
-          session = requests.Session()
-          session.headers.update({
-              "User-Agent": (
-                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 Chrome/130.0 Safari/537.36"
-              ),
-              "Accept-Language": "fa-IR,fa;q=0.9,en;q=0.8"
-          })
+          def get_tgju_items(market, keys):
+              url = f"{TGJU}/v1/markets/{market}/items"
+              data = get_json(url + "?keys=" + ",".join(keys))
+              items = data.get("items", [])
+              return {item.get("key"): item for item in items}
 
-          def fa_digits(value):
-              return str(value).translate(
-                  str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
-              )
-
-          def parse_number(text):
-              if not text:
-                  return None
-
-              text = str(text).translate(
-                  str.maketrans(
-                      "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
-                      "01234567890123456789"
-                  )
-              )
-
-              text = text.replace(",", "").replace("٬", "")
-              text = text.replace("٫", ".")
-              text = text.replace("−", "-").replace("٪", "%")
-
-              match = re.search(r"-?\d+(?:\.\d+)?", text)
-
-              if not match:
-                  return None
-
-              try:
-                  return float(match.group())
-              except ValueError:
-                  return None
-
-          def format_price(value):
-              return fa_digits(
-                  f"{int(round(value)):,}".replace(",", "٬")
-              )
-
-          def format_change(value):
+          def toman(item):
+              value = item.get("price", {}).get("value")
               if value is None:
-                  return "⚪ نامشخص"
+                  raise ValueError("Price missing")
+              value = float(value) / 10
+              if value <= 0:
+                  raise ValueError("Invalid price")
+              return value
 
-              if value > 0:
-                  return f"🟢 +{fa_digits(f'{value:.2f}')}٪"
+          def change_text(item):
+              change = item.get("change", {})
+              percent = change.get("percent")
+              status = change.get("status")
 
-              if value < 0:
-                  return f"🔴 {fa_digits(f'{value:.2f}')}٪"
+              if percent is None or status not in ("low", "high"):
+                  return "درصد تغییر: نامشخص"
 
-              return "⚪ ۰٫۰۰٪"
+              sign = "+" if status == "high" else "-"
+              arrow = "▲" if status == "high" else "▼"
+              return f"{arrow} {sign}{abs(float(percent)):.2f}٪"
 
-          def get_page(slug):
-              url = BASE + slug
+          def fmt(value):
+              return f"{value:,.0f}"
 
-              for attempt in range(3):
+          def get_btc():
+              urls = [
+                  "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT",
+                  "https://data-api.binance.vision/api/v3/ticker/24hr?symbol=BTCUSDT"
+              ]
+
+              last_error = None
+              for url in urls:
                   try:
-                      response = session.get(
-                          url,
-                          timeout=25
-                      )
-                      response.raise_for_status()
+                      data = get_json(url)
+                      price = float(data["lastPrice"])
+                      change = float(data["priceChangePercent"])
+                      if price > 0:
+                          return price, change
+                  except Exception as e:
+                      last_error = e
 
-                      soup = BeautifulSoup(
-                          response.text,
-                          "html.parser"
-                      )
+              raise RuntimeError(f"Bitcoin sources failed: {last_error}")
 
-                      return soup
+          def send_telegram(message):
+              token = os.environ["BOT_TOKEN"]
+              channel = os.environ["CHANNEL_ID"]
 
-                  except Exception as error:
-                      print(
-                          f"TGJU attempt {attempt + 1}/3 "
-                          f"failed for {slug}: {error}"
-                      )
+              url = f"https://api.telegram.org/bot{token}/sendMessage"
+              response = requests.post(
+                  url,
+                  data={
+                      "chat_id": channel,
+                      "text": message,
+                      "disable_web_page_preview": True
+                  },
+                  timeout=TIMEOUT
+              )
+              response.raise_for_status()
 
-                      if attempt < 2:
-                          time.sleep(3 * (attempt + 1))
+              result = response.json()
+              if not result.get("ok"):
+                  raise RuntimeError(result)
 
-              raise RuntimeError(
-                  f"Could not fetch TGJU page: {slug}"
+          def main():
+              currency = get_tgju_items(
+                  "currency",
+                  ["price_dollar_rl", "price_eur", "price_aed"]
               )
 
-          def get_table_values(soup):
-              values = {}
+              gold = get_tgju_items(
+                  "gold",
+                  ["geram18"]
+              )
 
-              for row in soup.select("tr"):
-                  cells = row.find_all(
-                      ["td", "th"],
-                      recursive=False
-                  )
+              coin = get_tgju_items(
+                  "coin",
+                  ["sekee", "nim", "rob"]
+              )
 
-                  if len(cells) < 2:
-                      continue
-
-                  label = " ".join(
-                      cells[0].get_text(" ", strip=True).split()
-                  )
-
-                  value = " ".join(
-                      " ".join(
-                          cell.get_text(" ", strip=True)
-                          for cell in cells[1:]
-                      ).split()
-                  )
-
-                  if label:
-                      values[label] = value
-
-              return values
-
-          def get_price(soup):
-              tables = get_table_values(soup)
-
-              for label, value in tables.items():
-                  if "نرخ فعلی" in label:
-                      price = parse_number(value)
-
-                      if price and price > 0:
-                          return price
-
-              # Fallback: search page text for the current rate.
-              text = soup.get_text(" ", strip=True)
-
-              patterns = [
-                  r"نرخ فعلی\s*:?\s*([\d۰-۹٠-٩٬,]+)",
-                  r"در حال حاضر قیمت.*?([\d۰-۹٠-٩٬,]+)\s*ریال",
+              assets = [
+                  ("دلار آزاد", currency["price_dollar_rl"]),
+                  ("یورو", currency["price_eur"]),
+                  ("درهم امارات", currency["price_aed"]),
+                  ("طلای ۱۸ عیار", gold["geram18"]),
+                  ("سکه امامی", coin["sekee"]),
+                  ("نیم‌سکه", coin["nim"]),
+                  ("ربع‌سکه", coin["rob"]),
               ]
 
-              for pattern in patterns:
-                  match = re.search(pattern, text)
+              now = datetime.now(ZoneInfo("Asia/Tehran"))
+              date_text = now.strftime("%Y/%m/%d")
+              time_text = now.strftime("%H:%M:%S")
 
-                  if match:
-                      price = parse_number(match.group(1))
-
-                      if price and price > 0:
-                          return price
-
-              raise ValueError("Current price not found")
-
-          def get_change(soup):
-              tables = get_table_values(soup)
-
-              for label, value in tables.items():
-                  if "درصد تغییر نسبت به روز گذشته" in label:
-                      number = parse_number(value)
-
-                      if number is not None:
-                          return number
-
-              return None
-
-          def get_asset(key, slug, label):
-              soup = get_page(slug)
-
-              price = get_price(soup)
-              change = get_change(soup)
-
-              # TGJU quotes Iranian market prices in rial.
-              # Convert to toman for Telegram.
-              if key != "btc":
-                  price = price / 10
-
-              print(
-                  f"Fetched {key}: price={price}, "
-                  f"change={change}"
-              )
-
-              return {
-                  "label": label,
-                  "price": price,
-                  "change": change
-              }
-
-          def gregorian_to_jalali(gy, gm, gd):
-              g_days = [
-                  31, 28, 31, 30, 31, 30,
-                  31, 31, 30, 31, 30, 31
-              ]
-
-              gy2 = gy - 1600
-              gm2 = gm - 1
-              gd2 = gd - 1
-
-              day_no = (
-                  365 * gy2
-                  + (gy2 + 3) // 4
-                  - (gy2 + 99) // 100
-                  + (gy2 + 399) // 400
-              )
-
-              for i in range(gm2):
-                  day_no += g_days[i]
-
-              if gm2 > 1 and (
-                  (gy % 4 == 0 and gy % 100 != 0)
-                  or gy % 400 == 0
-              ):
-                  day_no += 1
-
-              day_no += gd2
-              j_day_no = day_no - 79
-
-              j_np = j_day_no // 12053
-              j_day_no %= 12053
-
-              jy = 979 + 33 * j_np + 4 * (j_day_no // 1461)
-              j_day_no %= 1461
-
-              if j_day_no >= 366:
-                  jy += (j_day_no - 1) // 365
-                  j_day_no = (j_day_no - 1) % 365
-
-              if j_day_no < 186:
-                  jm = 1 + j_day_no // 31
-                  jd = 1 + j_day_no % 31
-              else:
-                  jm = 7 + (j_day_no - 186) // 30
-                  jd = 1 + (j_day_no - 186) % 30
-
-              return jy, jm, jd
-
-          def build_message(rates):
               lines = [
-                  "📊 نبض دلار | قیمت ارز و طلا",
-                  ""
+                  "📊 نبض دلار | قیمت بازار",
+                  "━━━━━━━━━━━━━━━━━━"
               ]
 
-              for key, item in rates.items():
-                  label = item["label"]
-                  change = format_change(item["change"])
-
-                  if key == "btc":
-                      lines.append(
-                          f"{label}: {change}"
-                      )
-                      continue
-
+              for name, item in assets:
+                  price = toman(item)
+                  change = change_text(item)
                   lines.append(
-                      f"{label}: "
-                      f"{format_price(item['price'])} تومان "
-                      f"| {change}"
+                      f"💰 {name}: {fmt(price)} تومان\n"
+                      f"   {change}"
                   )
 
-              now = datetime.now(TEHRAN)
-
-              jy, jm, jd = gregorian_to_jalali(
-                  now.year,
-                  now.month,
-                  now.day
-              )
-
-              date_text = fa_digits(
-                  f"{jy:04d}/{jm:02d}/{jd:02d}"
-              )
-
-              time_text = fa_digits(
-                  now.strftime("%H:%M")
-              )
+              btc_price, btc_change = get_btc()
+              btc_sign = "+" if btc_change >= 0 else ""
+              btc_arrow = "▲" if btc_change >= 0 else "▼"
 
               lines.extend([
                   "",
-                  f"📅 زمان دریافت و ارسال: "
-                  f"{date_text} - {time_text} تهران",
-                  "📡 منبع قیمت‌ها: TGJU",
+                  "🪙 بازار ارز دیجیتال",
+                  f"₿ بیت‌کوین: {fmt(btc_price)} تتر",
+                  f"   {btc_arrow} {btc_sign}{btc_change:.2f}٪"
+              ])
+
+              lines.extend([
+                  "",
+                  "━━━━━━━━━━━━━━━━━━",
+                  f"🗓 تاریخ: {date_text}",
+                  f"🕒 ساعت تهران: {time_text}",
+                  "",
                   "⚠️ قیمت‌ها ممکن است تغییر کنند.",
                   "صرفاً جهت اطلاع‌رسانی؛ نه توصیه خرید یا فروش.",
                   "",
                   "@dollariran5"
               ])
 
-              return "\n".join(lines)
-
-          def send_to_telegram(token, channel, message):
-              url = (
-                  f"https://api.telegram.org/bot{token}/sendMessage"
-              )
-
-              response = requests.post(
-                  url,
-                  data={
-                      "chat_id": channel,
-                      "text": message
-                  },
-                  timeout=25
-              )
-
-              response.raise_for_status()
-              result = response.json()
-
-              if not result.get("ok"):
-                  raise RuntimeError(
-                      result.get(
-                          "description",
-                          "Telegram send failed"
-                      )
-                  )
-
+              message = "\n".join(lines)
+              send_telegram(message)
               print("MESSAGE SENT SUCCESSFULLY")
 
-          bot_token = os.environ.get(
-              "BOT_TOKEN", ""
-          ).strip()
-
-          channel_id = os.environ.get(
-              "CHANNEL_ID", ""
-          ).strip()
-
-          if not bot_token or not channel_id:
-              raise RuntimeError(
-                  "Missing BOT_TOKEN or CHANNEL_ID"
-              )
-
-          rates = {}
-
-          for key, (slug, label) in ASSETS.items():
-              try:
-                  rates[key] = get_asset(
-                      key,
-                      slug,
-                      label
-                  )
-              except Exception as error:
-                  print(
-                      f"Failed to fetch {key}: {error}"
-                  )
-
-          if "usd" not in rates:
-              raise RuntimeError(
-                  "Dollar price unavailable; "
-                  "message will not be sent."
-              )
-
-          message = build_message(rates)
-
-          print("MESSAGE PREVIEW:")
-          print(message)
-
-          send_to_telegram(
-              bot_token,
-              channel_id,
-              message
-          )
+          if __name__ == "__main__":
+              main()
           PY
