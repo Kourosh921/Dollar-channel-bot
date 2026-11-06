@@ -113,17 +113,14 @@ jobs:
 
               if status in ("high", "up", "positive", "increase"):
                   percent = abs(percent)
-
               elif status in ("low", "down", "negative", "decrease"):
                   percent = -abs(percent)
-
               elif status not in ("", "none"):
                   return "⚪ نامشخص"
 
               if percent > 0:
                   return f"▲ +{percent:.2f}٪"
-
-              if percent < 0:
+              elif percent < 0:
                   return f"▼ {percent:.2f}٪"
 
               return "➖ ۰٫۰۰٪"
@@ -140,7 +137,6 @@ jobs:
               for url in urls:
                   try:
                       data = get_json(url)
-
                       price = float(data["lastPrice"])
                       change = float(data["priceChangePercent"])
 
@@ -201,9 +197,7 @@ jobs:
                   ("ربع‌سکه", coins["rob"])
               ]
 
-              now = datetime.now(
-                  ZoneInfo("Asia/Tehran")
-              )
+              now = datetime.now(ZoneInfo("Asia/Tehran"))
 
               jalali = jdatetime.datetime.fromgregorian(
                   datetime=now.replace(tzinfo=None)
@@ -245,7 +239,6 @@ jobs:
               ])
 
               send_telegram("\n".join(lines))
-
               print("MESSAGE SENT SUCCESSFULLY")
 
           if __name__ == "__main__":
