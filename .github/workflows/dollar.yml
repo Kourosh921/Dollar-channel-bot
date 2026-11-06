@@ -46,20 +46,17 @@ jobs:
       - name: Send prices
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          CHANNEL_ID: "@Nabzd0llar"
         run: |
           python <<'PY'
           import os
-          import json
           import requests
           import jdatetime
 
-          from pathlib import Path
           from datetime import datetime
           from zoneinfo import ZoneInfo
 
           TGJU = "http://localhost:8080"
-          STATE_FILE = Path("prices.json")
           TIMEOUT = 20
 
           def get_json(url):
@@ -69,7 +66,9 @@ jobs:
 
           def get_items(market, keys):
               url = f"{TGJU}/v1/markets/{market}/items"
-              data = get_json(url + "?keys=" + ",".join(keys))
+              data = get_json(
+                  url + "?keys=" + ",".join(keys)
+              )
 
               items = data.get("items", [])
 
@@ -95,46 +94,39 @@ jobs:
 
               return value
 
-          def load_previous():
-              try:
-                  return json.loads(
-                      STATE_FILE.read_text(encoding="utf-8")
-                  )
-              except Exception:
-                  return {}
+          def calculate_change(item):
+              change = item.get("change") or {}
 
-          def calculate_change(name, price, previous, item):
-              change = item.get("change", {})
-              status = change.get("status")
+              if not isinstance(change, dict):
+                  return "⚪ نامشخص"
+
               percent = change.get("percent")
+              status = str(change.get("status") or "").lower()
 
-              # First preference: daily change from TGJU
-              if percent is not None and status in ("high", "low"):
-                  percent = abs(float(percent))
+              if percent is None:
+                  return "⚪ نامشخص"
 
-                  if status == "high":
-                      return f"▲ +{percent:.2f}٪"
+              try:
+                  percent = float(percent)
+              except (ValueError, TypeError):
+                  return "⚪ نامشخص"
 
-                  return f"▼ -{percent:.2f}٪"
+              if status in ("high", "up", "positive", "increase"):
+                  percent = abs(percent)
 
-              # Second preference: compare with previous bot run
-              old_price = previous.get(name)
+              elif status in ("low", "down", "negative", "decrease"):
+                  percent = -abs(percent)
 
-              if old_price is not None and float(old_price) > 0:
-                  percent = (
-                      (price - float(old_price))
-                      / float(old_price)
-                  ) * 100
+              elif status not in ("", "none"):
+                  return "⚪ نامشخص"
 
-                  if percent > 0:
-                      return f"▲ +{percent:.2f}٪"
+              if percent > 0:
+                  return f"▲ +{percent:.2f}٪"
 
-                  if percent < 0:
-                      return f"▼ {percent:.2f}٪"
+              if percent < 0:
+                  return f"▼ {percent:.2f}٪"
 
-                  return "➖ ۰٫۰۰٪"
-
-              return "🆕 ثبت اولیه"
+              return "➖ ۰٫۰۰٪"
 
           def fmt(number):
               return f"{number:,.0f}"
@@ -148,11 +140,13 @@ jobs:
               for url in urls:
                   try:
                       data = get_json(url)
+
                       price = float(data["lastPrice"])
                       change = float(data["priceChangePercent"])
 
                       if price > 0:
                           return price, change
+
                   except Exception as error:
                       print("Bitcoin source failed:", error)
 
@@ -182,9 +176,6 @@ jobs:
                   raise RuntimeError(result)
 
           def main():
-              previous = load_previous()
-              current = {}
-
               currency = get_items(
                   "currency",
                   ["price_dollar_rl", "price_eur", "price_aed"]
@@ -210,7 +201,10 @@ jobs:
                   ("ربع‌سکه", coins["rob"])
               ]
 
-              now = datetime.now(ZoneInfo("Asia/Tehran"))
+              now = datetime.now(
+                  ZoneInfo("Asia/Tehran")
+              )
+
               jalali = jdatetime.datetime.fromgregorian(
                   datetime=now.replace(tzinfo=None)
               )
@@ -222,11 +216,7 @@ jobs:
 
               for name, item in assets:
                   price = get_price(item)
-                  change = calculate_change(
-                      name, price, previous, item
-                  )
-
-                  current[name] = price
+                  change = calculate_change(item)
 
                   lines.append(
                       f"💰 {name}: {fmt(price)} تومان\n"
@@ -256,25 +246,8 @@ jobs:
 
               send_telegram("\n".join(lines))
 
-              STATE_FILE.write_text(
-                  json.dumps(current, ensure_ascii=False, indent=2),
-                  encoding="utf-8"
-              )
-
               print("MESSAGE SENT SUCCESSFULLY")
 
           if __name__ == "__main__":
               main()
           PY
-
-      - name: Save previous prices
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add prices.json
-
-          if ! git diff --cached --quiet; then
-            git commit -m "Update previous prices"
-            git push
-          fi
